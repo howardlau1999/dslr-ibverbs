@@ -16,14 +16,20 @@ struct ConnectionOptions {
   /// Outstanding RDMA READ/atomic operations allowed per queue pair (clamped to the device
   /// limits). DSLR issues one operation at a time, so a small value is plenty.
   uint32_t atomic_depth = 16;
-  /// IB "local ACK timeout" exponent: 4.096 us * 2^value per retry (14 ~ 67 ms).
+  /// IB "local ACK timeout" exponent: nominally 4.096 us * 2^value per attempt (14 ~ 67 ms).
+  /// Real NICs round this up: mlx5 (ConnectX) in RoCE mode was measured to wait ~0.5 s per
+  /// attempt for any value <= 16 and twice the nominal time above that.
   uint8_t ack_timeout = 14;
   /// Transport retries before the queue pair goes into error, i.e. before a dead peer is
-  /// reported as a failed completion. The paper detects node failures the same way (Section 4.7).
+  /// reported as a failed completion (IBV_WC_RETRY_EXC_ERR). The paper detects node failures
+  /// the same way (Section 4.7). With the mlx5 behaviour above, 7 retries report a dead lock
+  /// table server after ~4 s.
   uint8_t retry_count = 7;
   uint8_t rnr_retry = 7;
-  /// How long to spin on the completion queue before declaring the connection dead.
-  std::chrono::milliseconds completion_timeout{5000};
+  /// How long to spin on the completion queue before declaring the connection dead. This is a
+  /// last resort for a NIC that never completes the request at all; keep it well above
+  /// (retry_count + 1) * effective ACK timeout so the RC error is the one that gets reported.
+  std::chrono::milliseconds completion_timeout{10000};
 };
 
 /// One reliable-connected (RC) queue pair with its own completion queue, driven synchronously:

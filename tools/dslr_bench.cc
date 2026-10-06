@@ -192,6 +192,7 @@ struct WorkerResult {
   uint64_t locks_granted = 0;
   LatencyHistogram latency;
   dslr::SessionStats stats;
+  std::string error;  ///< set when the worker died of an exception (e.g. a lock table went away)
 };
 
 void add(dslr::SessionStats& into, const dslr::SessionStats& from) {
@@ -222,7 +223,7 @@ struct LockRequest {
 };
 
 void run_worker(const BenchOptions& options, unsigned worker_id, dslr::LockWordAccessor& accessor,
-                uint32_t node_count, const std::atomic<int>& phase, WorkerResult& result) {
+                uint32_t node_count, std::atomic<int>& phase, WorkerResult& result) {
   dslr::LockSession session(accessor, options.config, options.seed + worker_id);
   std::mt19937_64 rng(options.seed * 7919 + worker_id);
   ZipfSampler sampler(uint64_t{node_count} * options.locks, options.zipf);
@@ -230,75 +231,84 @@ void run_worker(const BenchOptions& options, unsigned worker_id, dslr::LockWordA
   std::vector<LockRequest> requests;
 
   // phase: 0 = warm-up (run but do not record), 1 = measuring, 2 = stop.
-  while (phase.load(std::memory_order_relaxed) != 2) {
-    requests.clear();
-    while (requests.size() < options.locks_per_txn) {
-      const uint64_t rank = sampler(rng);
-      const dslr::LockRef ref{static_cast<uint32_t>(rank % node_count),
-                              static_cast<uint32_t>(rank / node_count)};
-      const bool duplicate = std::any_of(requests.begin(), requests.end(),
-                                         [&](const LockRequest& r) { return r.ref == ref; });
-      if (!duplicate) {
-        requests.push_back({ref, coin(rng) < options.shared_ratio ? dslr::LockMode::Shared
-                                                                  : dslr::LockMode::Exclusive});
+  try {
+    while (phase.load(std::memory_order_relaxed) != 2) {
+      requests.clear();
+      while (requests.size() < options.locks_per_txn) {
+        const uint64_t rank = sampler(rng);
+        const dslr::LockRef ref{static_cast<uint32_t>(rank % node_count),
+                                static_cast<uint32_t>(rank / node_count)};
+        const bool duplicate = std::any_of(requests.begin(), requests.end(),
+                                           [&](const LockRequest& r) { return r.ref == ref; });
+        if (!duplicate) {
+          requests.push_back({ref, coin(rng) < options.shared_ratio ? dslr::LockMode::Shared
+                                                                    : dslr::LockMode::Exclusive});
+        }
       }
-    }
-    if (options.sort_locks) {
-      // A global order on lock objects is the classic way to avoid deadlocks.
-      std::sort(requests.begin(), requests.end(), [](const LockRequest& a, const LockRequest& b) {
-        return std::tie(a.ref.node, a.ref.index) < std::tie(b.ref.node, b.ref.index);
-      });
-    }
+      if (options.sort_locks) {
+        // A global order on lock objects is the classic way to avoid deadlocks.
+        std::sort(requests.begin(), requests.end(),
+                  [](const LockRequest& a, const LockRequest& b) {
+                    return std::tie(a.ref.node, a.ref.index) < std::tie(b.ref.node, b.ref.index);
+                  });
+      }
 
-    const auto start = Clock::now();
-    unsigned aborts = 0;
-    unsigned revoked = 0;
-    bool crashed = false;
-    while (true) {
-      dslr::Transaction txn(session);
-      bool ok = true;
-      for (const LockRequest& request : requests) {
-        if (!txn.lock(request.ref, request.mode, options.slots)) {
-          ok = false;
-          break;
+      const auto start = Clock::now();
+      unsigned aborts = 0;
+      unsigned revoked = 0;
+      bool crashed = false;
+      while (true) {
+        dslr::Transaction txn(session);
+        bool ok = true;
+        for (const LockRequest& request : requests) {
+          if (!txn.lock(request.ref, request.mode, options.slots)) {
+            ok = false;
+            break;
+          }
         }
-      }
-      if (!ok) {
-        ++aborts;
-        if (phase.load(std::memory_order_relaxed) == 2) {
-          break;
+        if (!ok) {
+          ++aborts;
+          if (phase.load(std::memory_order_relaxed) == 2) {
+            break;
+          }
+          continue;
         }
-        continue;
-      }
-      if (options.think.count() > 0) {
-        dslr::sleep_for_precise(options.think);
-      }
-      if (options.fail_rate > 0 && coin(rng) < options.fail_rate) {
-        txn.abandon();  // crash while holding the locks: tickets are never released
-        crashed = true;
-      } else if (!txn.commit()) {
-        // A lease expired and the ticket was revoked meanwhile: the work must be redone.
-        ++revoked;
-        if (phase.load(std::memory_order_relaxed) == 2) {
-          break;
+        if (options.think.count() > 0) {
+          dslr::sleep_for_precise(options.think);
         }
-        continue;
+        if (options.fail_rate > 0 && coin(rng) < options.fail_rate) {
+          txn.abandon();  // crash while holding the locks: tickets are never released
+          crashed = true;
+        } else if (!txn.commit()) {
+          // A lease expired and the ticket was revoked meanwhile: the work must be redone.
+          ++revoked;
+          if (phase.load(std::memory_order_relaxed) == 2) {
+            break;
+          }
+          continue;
+        }
+        break;
       }
-      break;
-    }
-    const auto end = Clock::now();
+      const auto end = Clock::now();
 
-    if (phase.load(std::memory_order_relaxed) == 1) {
-      result.aborts += aborts;
-      result.revoked += revoked;
-      if (crashed) {
-        ++result.crashes;
-      } else {
-        ++result.commits;
-        result.locks_granted += requests.size();
-        result.latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
+      if (phase.load(std::memory_order_relaxed) == 1) {
+        result.aborts += aborts;
+        result.revoked += revoked;
+        if (crashed) {
+          ++result.crashes;
+        } else {
+          ++result.commits;
+          result.locks_granted += requests.size();
+          result.latency.record(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start));
+        }
       }
     }
+  } catch (const std::exception& e) {
+    // Typically the RDMA connection to a lock table failed (server gone, fabric down). Record
+    // it and end the run: the other workers will hit the same wall, and partial numbers are
+    // still worth printing.
+    result.error = e.what();
+    phase.store(2);
   }
   result.stats = session.stats();
 }
@@ -411,13 +421,15 @@ int run(const BenchOptions& options) {
             << options.config.count_max << std::endl;
 
   // Transport set-up. Workers share the local table; with RDMA each worker owns a client.
+  // The device must outlive the clients (their queue pairs live in its protection domain), so
+  // it is declared first and therefore destroyed last.
+#if DSLR_HAVE_RDMA
+  std::unique_ptr<dslr::rdma::Device> device;
+#endif
   std::unique_ptr<dslr::LocalLockTable> local_table;
   std::vector<std::unique_ptr<dslr::LockWordAccessor>> accessors(options.threads);
   uint32_t node_count = 1;
   uint32_t locks_per_node = options.locks;
-#if DSLR_HAVE_RDMA
-  std::unique_ptr<dslr::rdma::Device> device;
-#endif
   if (options.local) {
     local_table = std::make_unique<dslr::LocalLockTable>(options.locks);
   } else {
@@ -457,17 +469,35 @@ int run(const BenchOptions& options) {
     dslr::LockWordAccessor& accessor =
         options.local ? static_cast<dslr::LockWordAccessor&>(*local_table) : *accessors[i];
     workers.emplace_back(run_worker, std::cref(effective), i, std::ref(accessor), node_count,
-                         std::cref(phase), std::ref(results[i]));
+                         std::ref(phase), std::ref(results[i]));
   }
 
-  std::this_thread::sleep_for(options.warmup);
-  phase.store(1);
+  // Sleep in slices so that a worker that died (phase forced to 2) ends the run promptly.
+  auto wait_while = [&](std::chrono::microseconds how_long, int expected_phase) {
+    const auto until = Clock::now() + how_long;
+    while (Clock::now() < until && phase.load() == expected_phase) {
+      std::this_thread::sleep_for(std::min<std::chrono::microseconds>(
+          std::chrono::milliseconds(20),
+          std::chrono::duration_cast<std::chrono::microseconds>(until - Clock::now())));
+    }
+  };
+  wait_while(options.warmup, 0);
+  int expected = 0;
+  phase.compare_exchange_strong(expected, 1);
   const auto measure_start = Clock::now();
-  std::this_thread::sleep_for(options.duration);
+  wait_while(options.duration, 1);
   phase.store(2);
   const auto measure_end = Clock::now();
   for (std::thread& worker : workers) {
     worker.join();
+  }
+
+  bool failed = false;
+  for (unsigned i = 0; i < options.threads; ++i) {
+    if (!results[i].error.empty()) {
+      std::cerr << "dslr_bench: worker " << i << " failed: " << results[i].error << std::endl;
+      failed = true;
+    }
   }
 
   // Aggregate.
@@ -519,6 +549,11 @@ int run(const BenchOptions& options) {
             << "  releases               : " << s.releases << " (late " << s.late_releases
             << ", revoked " << s.revoked_releases << ", of which stray and undone "
             << s.stray_releases << ")\n";
+  if (failed) {
+    std::cerr << "dslr_bench: run ended early after " << fmt(seconds, 2)
+              << " s because a worker failed; the figures above are partial" << std::endl;
+    return 1;
+  }
   return 0;
 }
 

@@ -28,6 +28,9 @@ void send_exactly(int fd, const void* data, size_t length) {
       if (errno == EINTR) {
         continue;
       }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        throw RdmaError("bootstrap handshake timed out while sending to the peer");
+      }
       throw_errno("send");
     }
     bytes += n;
@@ -46,11 +49,23 @@ void recv_exactly(int fd, void* data, size_t length) {
       if (errno == EINTR) {
         continue;
       }
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        throw RdmaError(
+            "bootstrap handshake timed out: the peer accepted the connection but did not answer");
+      }
       throw_errno("recv");
     }
     bytes += n;
     length -= static_cast<size_t>(n);
   }
+}
+
+void set_io_timeout(int fd, std::chrono::milliseconds timeout) {
+  timeval tv{};
+  tv.tv_sec = static_cast<time_t>(timeout.count() / 1000);
+  tv.tv_usec = static_cast<suseconds_t>((timeout.count() % 1000) * 1000);
+  ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
 void enable_keepalive(int fd) {
@@ -177,8 +192,10 @@ UniqueFd tcp_connect(const std::string& host, uint16_t port, std::chrono::millis
       last_error = std::strerror(errno);
       continue;
     }
-    // Back to blocking mode for the simple exchange that follows.
+    // Back to blocking mode for the simple exchange that follows. The same timeout bounds the
+    // handshake: a peer that accepts but never answers must not hang us.
     ::fcntl(fd.get(), F_SETFL, ::fcntl(fd.get(), F_GETFL) & ~O_NONBLOCK);
+    set_io_timeout(fd.get(), timeout);
     enable_keepalive(fd.get());
     ::freeaddrinfo(results);
     return fd;

@@ -127,10 +127,15 @@ docs/rdma-layer.md       ibverbs details: queue pairs, bootstrap, byte order, So
   multi-slot leasing) and by multi-threaded stress tests with a lease-aware mutual-exclusion
   checker, including crashed transactions, deadlocks and tiny `COUNT_MAX` values. They pass
   under ThreadSanitizer and AddressSanitizer/UBSan.
-* The ibverbs layer compiles against rdma-core and is exercised by `tests/rdma_loopback_test.cc`
-  and `dslr_doctor` on any machine with an RDMA device (a Soft-RoCE device is enough). The
-  machine this code was developed on had neither an RDMA NIC nor a loadable `rdma_rxe`, so
-  those two have been reviewed but not executed; run `dslr_doctor` first on your hardware.
+* The ibverbs layer is exercised by `tests/rdma_loopback_test.cc` and `dslr_doctor` on any
+  machine with an RDMA device (a Soft-RoCE device is enough). It has been run on Mellanox
+  ConnectX NICs (mlx5, RoCE v2): `dslr_doctor`, the loopback tests (also under
+  AddressSanitizer/UBSan), `dslr_server` + `dslr_bench` on one and two lock table servers with
+  up to 8 client threads under Zipf contention, deadlock-prone and crashing workloads, and the
+  failure paths — a client killed while holding locks (the server drops it and later clients
+  recover the locks), a server killed under load (clients report the dead peer after ~4 s), a
+  handshake that cannot connect (reported on both sides at once), and a peer that accepts but
+  never answers. Run `dslr_doctor` first on new hardware: it also probes the atomic byte order.
 * Not implemented: the update-lock extension sketched in Section 5.2 of the paper (six
   10-bit counters). The core protocol, counter resets, lease-based failure/deadlock handling,
   random backoff and multi-slot leasing (Section 5.1) are implemented.

@@ -26,7 +26,15 @@ busy-polled. Latency is what matters for a lock manager; busy polling avoids the
 latency of completion channels. A per-operation deadline (`ConnectionOptions::completion_timeout`)
 turns a dead fabric into an exception instead of a hang; RC retry exhaustion
 (`IBV_WC_RETRY_EXC_ERR`) normally reports a dead peer earlier, which is also how the paper
-detects node failures.
+detects node failures. How much earlier depends on the NIC: the IB spec defines the local ACK
+timeout as `4.096 us * 2^timeout`, but mlx5 (ConnectX) in RoCE mode was measured to wait about
+0.5 s per attempt for any `timeout <= 16`, so the defaults (`timeout = 14`, `retry_cnt = 7`)
+report a crashed lock table server after roughly 4 s. Every later operation on that queue pair
+fails immediately; the owner has to reconnect.
+
+A `Device` must outlive every connection, memory region, client and server created on it (their
+verbs objects live in its protection domain). Destroying it first leaves `ibv_dealloc_pd` with
+`EBUSY`; the destructor reports that on stderr, and the dangling connections crash later.
 
 Queue pairs are not thread-safe, so a `ReliableConnection`, a `LockTableClient` and a
 `LockSession` all belong to one thread. Create one set per worker thread; they may share a
@@ -68,6 +76,15 @@ The TCP connection stays open as a liveness signal: when a client disappears, `r
 server returns and the client's queue pair is destroyed; TCP keepalive probes (10 s idle, 5 s
 interval, 3 probes) stand in for the periodic heartbeats the paper uses to detect node
 failures.
+
+A handshake can fail after the TCP connection is up: the frame is malformed, or the server
+cannot connect its queue pair to the client's address (`ibv_modify_qp(RTR)` fails with
+`ETIMEDOUT`/`EHOSTUNREACH` when the kernel cannot resolve the client's GID — typically the two
+sides use GIDs on different networks). The server then shuts the TCP connection down at once
+and reports the reason through `ServerOptions::on_handshake_error` (`dslr_server` logs it); the
+client sees "connection closed by peer" naming the server. The client's connect timeout also
+applies to the handshake itself as a socket send/receive timeout, so a foreign process that
+accepts the port but never answers is reported instead of waited for.
 
 ## Byte order of atomics — read this before running on real hardware
 

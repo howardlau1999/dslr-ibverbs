@@ -54,6 +54,8 @@ UniqueFd tcp_listen(const std::string& bind_address, uint16_t port, uint16_t* bo
 /// Accepts one connection; throws RdmaError if the listening socket was shut down.
 UniqueFd tcp_accept(const UniqueFd& listener);
 
+/// Connects to `host:port`. `timeout` bounds the TCP connect and, as a send/receive timeout on
+/// the returned socket, the handshake that follows.
 UniqueFd tcp_connect(const std::string& host, uint16_t port, std::chrono::milliseconds timeout);
 
 void send_endpoint(int fd, const EndpointInfo& info);

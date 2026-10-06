@@ -31,6 +31,10 @@ struct DeviceOptions {
 
 /// An opened RDMA device: the ibv_context, a protection domain shared by all queue pairs and
 /// memory regions of this process, and the attributes of the chosen port.
+///
+/// A Device must outlive every ReliableConnection, MemoryRegion, LockTableClient and
+/// LockTableServer created on it: they keep a reference to it and their verbs objects live in
+/// its protection domain. Declare the device first (or hold it in a longer-lived scope).
 class Device {
  public:
   explicit Device(const DeviceOptions& options = {});

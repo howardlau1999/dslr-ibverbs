@@ -17,15 +17,22 @@ LockTableClient::LockTableClient(const rdma::Device& device,
   reply_big_endian_ = device.atomic_byte_order().reply_big_endian;
   tables_.reserve(servers.size());
   for (const ServerAddress& server : servers) {
+    const std::string where = server.host + ":" + std::to_string(server.port);
     RemoteTable table;
     table.control = rdma::tcp_connect(server.host, server.port, connect_timeout);
     table.connection = std::make_unique<rdma::ReliableConnection>(device, options);
     // Handshake: we go first, the server answers with its queue pair and lock table.
-    rdma::send_endpoint(table.control.get(), table.connection->local_endpoint());
-    const rdma::EndpointInfo remote = rdma::recv_endpoint(table.control.get());
+    rdma::EndpointInfo remote;
+    try {
+      rdma::send_endpoint(table.control.get(), table.connection->local_endpoint());
+      remote = rdma::recv_endpoint(table.control.get());
+    } catch (const rdma::RdmaError& e) {
+      // The server closes the connection without an answer when it cannot connect its queue
+      // pair to us (its log has the reason); say which server so the operator knows where to look.
+      throw rdma::RdmaError("handshake with lock table server " + where + " failed: " + e.what());
+    }
     if (remote.table_locks == 0) {
-      throw rdma::RdmaError(server.host + ":" + std::to_string(server.port) +
-                            " did not export a lock table");
+      throw rdma::RdmaError(where + " did not export a lock table");
     }
     table.connection->connect(remote);
     table.base_addr = remote.table_addr;

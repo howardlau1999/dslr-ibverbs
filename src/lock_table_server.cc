@@ -128,9 +128,15 @@ void LockTableServer::serve_client(Client& client) {
                                                           byte_order_.memory_big_endian));
     // From here on the NIC does all the work; we only wait for the client to go away.
     rdma::wait_for_peer_close(client.control.get());
-  } catch (const std::exception&) {
+  } catch (const std::exception& e) {
     // A failed handshake or a vanished client: drop the connection below.
+    if (options_.on_handshake_error) {
+      options_.on_handshake_error(e.what());
+    }
   }
+  // Tell the peer right away: a client still waiting for our answer would otherwise block until
+  // this descriptor is finally closed, which happens only when the entry is reaped.
+  client.control.shutdown();
   client.connection.reset();
   std::lock_guard<std::mutex> guard(clients_mutex_);
   client.finished = true;

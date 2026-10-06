@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <random>
 
@@ -61,9 +62,10 @@ ReliableConnection::ReliableConnection(const Device& device, ConnectionOptions o
     attr.pkey_index = 0;
     attr.port_num = device.port();
     attr.qp_access_flags = kAccessFlags;
-    if (ibv_modify_qp(qp_, &attr,
-                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS) != 0) {
-      throw_errno("ibv_modify_qp(INIT)");
+    if (const int rc = ibv_modify_qp(
+            qp_, &attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS);
+        rc != 0) {
+      throw_errno("ibv_modify_qp(INIT)", rc);
     }
   } catch (...) {
     destroy();
@@ -131,10 +133,27 @@ void ReliableConnection::connect(const EndpointInfo& remote) {
     rtr.ah_attr.grh.traffic_class = 0;
     rtr.ah_attr.grh.flow_label = 0;
   }
-  if (ibv_modify_qp(qp_, &rtr,
-                    IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
-                        IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER) != 0) {
-    throw_errno("ibv_modify_qp(RTR)");
+  // ibv_modify_qp() returns the errno value (and sets errno) on failure.
+  if (const int err = ibv_modify_qp(qp_, &rtr,
+                                    IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+                                        IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
+                                        IBV_QP_MIN_RNR_TIMER);
+      err != 0) {
+    if (device_.needs_global_routing() &&
+        (err == ETIMEDOUT || err == EHOSTUNREACH || err == ENETUNREACH)) {
+      // On RoCE the kernel resolves the destination GID to a MAC address (ARP/ND) while
+      // building the address vector; these errors mean the peer's address is not reachable from
+      // the GID we use as source.
+      ibv_gid dgid{};
+      std::memcpy(dgid.raw, remote.gid.data(), remote.gid.size());
+      throw RdmaError("ibv_modify_qp(RTR): " + std::string(std::strerror(err)) + " (errno " +
+                      std::to_string(err) + "): cannot resolve the peer's GID " + to_string(dgid) +
+                      " from our GID " + to_string(device_.gid()) + " (index " +
+                      std::to_string(device_.gid_index()) + " of " + device_.name() +
+                      "); the two must be on the same or a routed network, check the GID "
+                      "indices on both sides");
+    }
+    throw_errno("ibv_modify_qp(RTR)", err);
   }
 
   // RTR -> RTS: our own send-side parameters.
@@ -145,10 +164,11 @@ void ReliableConnection::connect(const EndpointInfo& remote) {
   rts.rnr_retry = options_.rnr_retry;
   rts.sq_psn = initial_psn_;
   rts.max_rd_atomic = static_cast<uint8_t>(depth);
-  if (ibv_modify_qp(qp_, &rts,
-                    IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
-                        IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC) != 0) {
-    throw_errno("ibv_modify_qp(RTS)");
+  if (const int rc = ibv_modify_qp(qp_, &rts,
+                                   IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT |
+                                       IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN | IBV_QP_MAX_QP_RD_ATOMIC);
+      rc != 0) {
+    throw_errno("ibv_modify_qp(RTS)", rc);
   }
   connected_ = true;
 }

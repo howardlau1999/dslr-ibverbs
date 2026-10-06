@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -24,6 +25,10 @@ struct ServerOptions {
   std::string bind_address = "0.0.0.0";
   uint16_t port = 7777;
   rdma::ConnectionOptions connection;
+  /// Called from a server thread when a client's handshake fails (malformed bootstrap frame,
+  /// queue pair cannot be connected to the client's address, ...). The client only sees its
+  /// connection being closed, so this is where the reason can be logged. Optional.
+  std::function<void(const std::string& error)> on_handshake_error;
 };
 
 /// Hosts one node's lock table and hands out RDMA access to it.

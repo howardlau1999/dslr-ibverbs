@@ -56,6 +56,9 @@ int main(int argc, char** argv) {
   options.bind_address = args.get("bind", "0.0.0.0");
   options.port = args.number<uint16_t>("port", 7777);
   const auto dump_interval = args.duration("dump-interval", std::chrono::microseconds{0});
+  options.on_handshake_error = [](const std::string& error) {
+    std::cerr << "dslr_server: client handshake failed: " << error << std::endl;
+  };
 
   try {
     dslr::LockTableServer server(options);

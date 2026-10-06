@@ -85,7 +85,16 @@ Device::Device(const DeviceOptions& options) : port_(options.port) {
 
 Device::~Device() {
   if (pd_ != nullptr) {
-    ibv_dealloc_pd(pd_);
+    // EBUSY means queue pairs or memory regions created on this device are still alive. They
+    // hold a dangling reference to us from now on and will crash when destroyed; say so here,
+    // where the cause is, rather than in ibv_destroy_qp() later.
+    if (const int rc = ibv_dealloc_pd(pd_); rc != 0) {
+      std::fprintf(stderr,
+                   "dslr::rdma::Device(%s) destroyed while queue pairs or memory regions still "
+                   "use it (ibv_dealloc_pd: %s); destroy connections and regions before the "
+                   "device\n",
+                   name().c_str(), std::strerror(rc));
+    }
   }
   if (context_ != nullptr) {
     ibv_close_device(context_);
