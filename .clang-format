@@ -1,0 +1,22 @@
+# Google style with a wider line to keep the paper's formulas readable on one line.
+BasedOnStyle: Google
+ColumnLimit: 100
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<infiniband/'
+    Priority: 1
+  - Regex: '^<[a-z_/]+\.h>$'
+    Priority: 2
+  - Regex: '^<[a-z_]+>$'
+    Priority: 3
+  - Regex: '^<gtest/'
+    Priority: 4
+  - Regex: '^"dslr/'
+    Priority: 5
+  - Regex: '.*'
+    Priority: 6
