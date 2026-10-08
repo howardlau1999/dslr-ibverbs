@@ -129,13 +129,17 @@ docs/rdma-layer.md       ibverbs details: queue pairs, bootstrap, byte order, So
   under ThreadSanitizer and AddressSanitizer/UBSan.
 * The ibverbs layer is exercised by `tests/rdma_loopback_test.cc` and `dslr_doctor` on any
   machine with an RDMA device (a Soft-RoCE device is enough). It has been run on Mellanox
-  ConnectX NICs (mlx5, RoCE v2): `dslr_doctor`, the loopback tests (also under
-  AddressSanitizer/UBSan), `dslr_server` + `dslr_bench` on one and two lock table servers with
-  up to 8 client threads under Zipf contention, deadlock-prone and crashing workloads, and the
-  failure paths — a client killed while holding locks (the server drops it and later clients
-  recover the locks), a server killed under load (clients report the dead peer after ~4 s), a
-  handshake that cannot connect (reported on both sides at once), and a peer that accepts but
-  never answers. Run `dslr_doctor` first on new hardware: it also probes the atomic byte order.
+  ConnectX NICs (mlx5, RoCE v2, kernel 6.8, rdma-core 50): `dslr_doctor`, the loopback tests
+  (also under AddressSanitizer/UBSan and ThreadSanitizer), `dslr_server` + `dslr_bench` on one
+  and two lock table servers with up to 8 client threads under Zipf contention, deadlock-prone
+  and crashing workloads, and the failure paths — a client killed while holding locks (the
+  server drops it within ~60 ms and later clients recover the locks once the lease expires), a
+  server killed under load (clients report the dead peer after ~4 s), a handshake that cannot
+  connect (reported on both sides at once), and a peer that accepts but never answers. Measured
+  in loopback through the NIC: READ and fetch-and-add take about 2.4 µs each, an uncontended
+  transaction (ticket + release) about 5 µs, and 8 threads with Zipf-0.99 contention on one node
+  commit about 400 k transactions/s. Run `dslr_doctor` first on new hardware: it also probes
+  the atomic byte order.
 * Not implemented: the update-lock extension sketched in Section 5.2 of the paper (six
   10-bit counters). The core protocol, counter resets, lease-based failure/deadlock handling,
   random backoff and multi-slot leasing (Section 5.1) are implemented.

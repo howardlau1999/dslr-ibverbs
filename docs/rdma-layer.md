@@ -63,6 +63,15 @@ RoCE ports have no LIDs; packets are addressed by GID. Unless `DeviceOptions::gi
 `ibv_query_gid` on old kernels). `dslr_doctor` lists the GID table so you can override the
 choice when several networks are configured.
 
+The GID is an IP address of the port, and the kernel resolves the peer's GID to a MAC address
+(ARP) when the queue pair is moved to RTR. So the two sides must choose GIDs on the same (or a
+routed) IP network, exactly as for a TCP connection between those addresses — a multi-homed
+host with, say, `10.11.x.x` on index 3 and `10.15.x.x` on index 7 of each NIC must use the same
+index family on both ends. The symptom of a mismatch is `ibv_modify_qp(RTR): Connection timed
+out` after about a second, on whichever side connects second (the server, in the bootstrap
+below); the error message names both GIDs. Note that `dslr_doctor` and the loopback tests do not
+catch this: with both queue pairs on one port, any GID of that port resolves.
+
 ## Bootstrap
 
 Servers listen on TCP (`ServerOptions::port`, default 7777). A client connects, sends its
@@ -133,6 +142,38 @@ only if your critical sections are long; the RDMA tests use 50 ms. Note that `rd
 be loaded on hosts whose InfiniBand core stack comes from an out-of-tree OFED/DOCA package (the
 in-tree module is rejected with "Invalid argument" / symbol version mismatch); use a VM with a
 stock kernel or a machine with a real NIC in that case.
+
+## Sanitizers
+
+The RDMA layer runs cleanly under AddressSanitizer/UBSan and ThreadSanitizer (tests, server
+and a multi-threaded benchmark); nothing in the verbs path needs to be excluded:
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
+      -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+cmake --build build-asan && ctest --test-dir build-asan --output-on-failure
+```
+
+Two things to know:
+
+* ThreadSanitizer refuses to start on kernels ≥ 6.6 with the default `vm.mmap_rnd_bits = 32`
+  ("FATAL: ThreadSanitizer: unexpected memory mapping"), and since CMake's test discovery runs
+  each test binary right after linking it, the build of the test targets reports a failure as
+  well. Either lower the setting (`sudo sysctl vm.mmap_rnd_bits=28`) or, without root, let CMake
+  launch every test binary with ASLR disabled:
+
+  ```sh
+  cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer" \
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread" \
+        -DCMAKE_CROSSCOMPILING_EMULATOR="setarch;$(uname -m);-R"
+  cmake --build build-tsan && ctest --test-dir build-tsan --output-on-failure
+  setarch "$(uname -m)" -R ./build-tsan/dslr_doctor        # tools: prefix them by hand
+  ```
+* The result slot of a `ReliableConnection` is written by the NIC via DMA. The sanitizers do not
+  see that write, which is correct: the CPU reads it only after `ibv_poll_cq` returned the
+  completion, and the provider's poll routine contains the necessary barrier.
 
 ## Known limitations
 

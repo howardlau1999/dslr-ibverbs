@@ -172,6 +172,9 @@ TEST_F(RdmaLoopback, ServerDropsDisconnectedClients) {
 // answer. The client must report that promptly instead of waiting for the kernel to time out
 // the TCP connection (which never happens while the server process is alive).
 TEST_F(RdmaLoopback, HandshakeFailureIsReportedPromptlyAndLogged) {
+  if (device->port_attributes().link_layer != IBV_LINK_LAYER_ETHERNET) {
+    GTEST_SKIP() << "needs RoCE: only there does connecting to an unreachable GID fail";
+  }
   std::mutex mutex;
   std::vector<std::string> errors;
   ServerOptions options;
